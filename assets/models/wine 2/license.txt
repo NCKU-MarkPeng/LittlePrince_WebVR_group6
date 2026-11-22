@@ -1,0 +1,11 @@
+Model Information:
+* title:	Meatballs Flan Wine
+* source:	https://sketchfab.com/3d-models/meatballs-flan-wine-144c90916e19438e82fa93cd9b6552a0
+* author:	BrandXR (https://sketchfab.com/brandxr)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Meatballs Flan Wine" (https://sketchfab.com/3d-models/meatballs-flan-wine-144c90916e19438e82fa93cd9b6552a0) by BrandXR (https://sketchfab.com/brandxr) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>小王子場景</title>
+    <script src="https://aframe.io/releases/1.8.0/aframe.min.js"></script>
+
+    <script src="camera_director.js"></script>
+    <script src="altitude_fade.js"></script>
+    <script src="king_planet.js"></script>
+    <script src="lamplighter_planet.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/aframe-extras@7.5.0/dist/aframe-extras.min.js"></script>
+    <script src="drunkard_planet.js"></script>
+
+
+    <script>
+        // 自訂「擠出形狀」：給 2D 頂點，長出有厚度的柱體
+        // 用法：geometry="primitive: prism; points: x1 y1, x2 y2, x3 y3; depth: 厚度"
+        AFRAME.registerGeometry('prism', {
+        schema: {
+            points: {type: 'string', default: '0 0, 1 0, 0 1'},
+            depth: {type: 'number', default: 0.1}
+        },
+        init: function (data) {
+            const pts = data.points.split(',').map(p => p.trim().split(/\s+/).map(Number));
+            const shape = new THREE.Shape();
+            pts.forEach(([x, y], i) => (i === 0 ? shape.moveTo(x, y) : shape.lineTo(x, y)));
+            shape.closePath();
+            const geometry = new THREE.ExtrudeGeometry(shape, {depth: data.depth, bevelEnabled: false});
+            geometry.translate(0, 0, -data.depth / 2);
+            this.geometry = geometry;
+        }
+        });
+    </script>
+
+    <script>
+        // 讓平面產生柔和起伏：中間平坦，往外慢慢變明顯
+        AFRAME.registerComponent('ground-waves', {
+            schema: {
+            height: {default: 0.5},       // 起伏高度（公尺）
+            size: {default: 0.08},        // 起伏的密度，越大波浪越密
+            flatRadius: {default: 10},    // 中間保持平坦的半徑
+            fade: {default: 15}           // 從平坦過渡到完整起伏的距離
+            },
+            init: function () {
+            const apply = () => {
+                const mesh = this.el.getObject3D('mesh');
+                if (!mesh) return;
+                const d = this.data;
+                const pos = mesh.geometry.attributes.position;
+                for (let i = 0; i < pos.count; i++) {
+                const x = pos.getX(i), y = pos.getY(i);
+                // 幾組不同方向的波疊在一起，看起來比較自然
+                const h = Math.sin(x * d.size) * Math.cos(y * d.size * 1.3) * 0.6
+                        + Math.sin((x + y) * d.size * 0.5) * 0.4;
+                // 離中心越遠起伏越明顯
+                const dist = Math.sqrt(x * x + y * y);
+                const t = Math.min(Math.max((dist - d.flatRadius) / d.fade, 0), 1);
+                const smooth = t * t * (3 - 2 * t);
+                pos.setZ(i, h * d.height * smooth);
+                }
+                pos.needsUpdate = true;
+                mesh.geometry.computeVertexNormals();
+            };
+            if (this.el.getObject3D('mesh')) apply();
+            else this.el.addEventListener('object3dset', apply, {once: true});
+            }
+        });
+    </script>
+
+    <script>
+        // 花瓣：半橢圓薄片，底邊平、上緣圓，從原點往 +y 長
+        AFRAME.registerGeometry('petal', {
+            schema: {
+            width:    {default: 0.04},
+            length:   {default: 0.05},
+            depth:    {default: 0.002},
+            segments: {default: 10}
+            },
+            init: function (d) {
+            const shape = new THREE.Shape();
+            for (let i = 0; i <= d.segments; i++) {
+                const a = Math.PI - (Math.PI * i) / d.segments;
+                const x = (d.width / 2) * Math.cos(a), y = d.length * Math.sin(a);
+                if (i === 0) shape.moveTo(x, y); else shape.lineTo(x, y);
+            }
+            shape.closePath();
+            const g = new THREE.ExtrudeGeometry(shape, {depth: d.depth, bevelEnabled: false});
+            g.translate(0, 0, -d.depth / 2);
+            this.geometry = g;
+            }
+        });
+
+        // 半片葉子：從葉柄 (0,0) 沿 +y 長到葉尖，往 +x 鼓出（mirror: true 往 -x）
+        // 兩個半片沿中脈折成 V 字，就有葉子彎曲的感覺
+        AFRAME.registerGeometry('leaf-half', {
+            schema: {
+            width:    {default: 0.02},
+            length:   {default: 0.07},
+            depth:    {default: 0.002},
+            mirror:   {default: false},
+            segments: {default: 12}
+            },
+            init: function (d) {
+            const s = d.mirror ? -1 : 1;
+            const shape = new THREE.Shape();
+            shape.moveTo(0, 0);
+            for (let i = 1; i < d.segments; i++) {
+                const t = i / d.segments;
+                const w = d.width * Math.pow(Math.sin(Math.PI * t), 0.8) * (1 - 0.3 * t); // 靠葉柄那側比較寬
+                shape.lineTo(s * w, d.length * t);
+            }
+            shape.lineTo(0, d.length);
+            shape.closePath();
+            const g = new THREE.ExtrudeGeometry(shape, {depth: d.depth, bevelEnabled: false});
+            g.translate(0, 0, -d.depth / 2);
+            this.geometry = g;
+            }
+        });
+
+        // 一圈花瓣：自動繞圓排好 count 片
+        // radius = 花瓣根部離中心多遠；tilt = 往外翻的角度（0 = 直立）；height = 這圈的高度
+        AFRAME.registerComponent('petal-ring', {
+            schema: {
+            count:  {default: 6},
+            radius: {default: 0.02},
+            height: {default: 0},
+            tilt:   {default: 30},
+            width:  {default: 0.04},
+            length: {default: 0.045},
+            offset: {default: 0},     // 整圈轉幾度，讓每層花瓣錯開
+            mixin:  {default: ''}
+            },
+            update: function () {
+            while (this.el.firstChild) this.el.removeChild(this.el.firstChild);
+            const d = this.data;
+            for (let i = 0; i < d.count; i++) {
+                const holder = document.createElement('a-entity');
+                holder.setAttribute('rotation', `0 ${d.offset + (360 * i) / d.count} 0`);
+                const p = document.createElement('a-entity');
+                p.setAttribute('position', `0 ${d.height} ${d.radius}`);
+                p.setAttribute('rotation', `${d.tilt} 0 0`);
+                p.setAttribute('geometry', `primitive: petal; width: ${d.width}; length: ${d.length}`);
+                if (d.mixin) p.setAttribute('mixin', d.mixin);
+                holder.appendChild(p);
+                this.el.appendChild(holder);
+            }
+            }
+        });
+    </script>
+
+    <script>
+        window.DIRECTOR_KEYFRAMES = [
+            {"name":"開始","pos":[-55.197,2.505,-40.285],"yaw":-120.6,"pitch":-5.3,"fov":53.6,"duration":4,"stop":true,"ease":"sine","slow":[]},
+            {"name":"飛機屁股","pos":[-6.939,3.34,-11.746],"yaw":-120.6,"pitch":-5.3,"fov":53.6,"duration":6,"stop":false,"ease":"sine","slow":[{"from":0.8,"to":1,"speed":0.6}]},
+            {"name":"飛機!","pos":[-7.006,4.602,-11.786],"yaw":-120.8,"pitch":-21.8,"fov":53.6,"duration":1,"stop":false,"ease":"sine","slow":[]},
+            {"name":"飛機2","pos":[-2.643,6.677,-9.047],"yaw":-123,"pitch":-50.2,"fov":53.6,"duration":2.5,"stop":false,"ease":"sine","slow":[]},
+            {"name":"飛機上空","pos":[0.706,6.677,-6.872],"yaw":-123.5,"pitch":-77.4,"fov":53.6,"duration":2,"stop":false,"ease":"sine","slow":[{"from":0.7,"to":1,"speed":0.5}]},
+            {"name":"飛機4","pos":[3.55,4.194,-4.962],"yaw":-125.8,"pitch":-89.9,"fov":53.6,"duration":3,"stop":false,"ease":"sine","slow":[]},
+            {"name":"飛機5","pos":[4.821,3.103,-4.03],"yaw":-120,"pitch":-23,"fov":53.6,"duration":2,"stop":false,"ease":"sine","slow":[]},
+            {"name":"飛機正面","pos":[5.6,1.441,-3.741],"yaw":-290.4,"pitch":-4.4,"fov":53.6,"duration":2,"stop":true,"ease":"sine","slow":[]},
+            {"name":"人物1","pos":[3.066,1.109,-0.673],"yaw":-334.6,"pitch":-9.6,"fov":53.6,"duration":2,"stop":false,"ease":"sine","slow":[]},
+            {"name":"人物正面","pos":[1.234,0.801,-1.987],"yaw":-373.1,"pitch":-13.2,"fov":53.6,"duration":2,"stop":true,"ease":"sine","slow":[]},
+            {"name":"星空","pos":[1.526,1.729,-2.774],"yaw":-512.4,"pitch":56.5,"fov":53.6,"duration":4,"stop":true,"ease":"sine","slow":[{"from":0,"to":0.2,"speed":0.7}]},
+            {"name":"點燈人-抵達1","pos":[46.2,147.5,82.7],"yaw":-512.4,"pitch":56.5,"fov":53.6,"duration":6,"stop":false,"ease":"sine","slow":[]},
+            {"name":"點燈人-抵達2","pos":[42.461,167.351,87.012],"yaw":-470.2,"pitch":-22.6,"fov":53.6,"duration":4,"stop":true,"ease":"sine","slow":[]},
+            {"name":"點燈人-轉向","pos":[39.6,164.8,84.8],"yaw":63.4,"pitch":13.4,"fov":60,"duration":2,"stop":true,"ease":"sine","slow":[]},
+            {"name":"酒鬼-抵達1","pos":[-87.752,197.859,21.027],"yaw":63.4,"pitch":13.4,"fov":60,"duration":7,"stop":false,"ease":"sine","slow":[]},
+            {"name":"酒鬼-抵達2","pos":[-99.832,202.705,21.407],"yaw":2.6,"pitch":-10.5,"fov":60,"duration":2,"stop":false,"ease":"sine","slow":[]},
+            {"name":"酒鬼-抵達3","pos":[-100.187,202.238,16.693],"yaw":-16,"pitch":-18.1,"fov":60,"duration":2,"stop":true,"ease":"sine","slow":[]},
+            {"name":"酒鬼-轉向","pos":[-89.1,204.7,10.8],"yaw":-68.8,"pitch":13.1,"fov":60,"duration":3,"stop":true,"ease":"sine","slow":[]},
+            {"name":"國王-抵達1","pos":[67.658,242.8,-50.002],"yaw":-68.8,"pitch":13.1,"fov":60,"duration":9,"stop":false,"ease":"sine","slow":[]},
+            {"name":"國王-抵達2","pos":[76.027,250.143,-50.836],"yaw":-45.3,"pitch":-12.3,"fov":60,"duration":4,"stop":true,"ease":"sine","slow":[]},
+            {"name":"國王-轉向","pos":[69.4,250.4,-59.4],"yaw":67.6,"pitch":16.7,"fov":60,"duration":2,"stop":true,"ease":"sine","slow":[]},
+            {"name":"b612","pos":[-122.924,312.258,-138.67],"yaw":67.6,"pitch":16.7,"fov":60,"duration":17,"stop":true,"ease":"sine","slow":[]},
+            {"name":"影格 24","pos":[-125.341,315.672,-144.041],"yaw":103.5,"pitch":6.3,"fov":60,"duration":2,"stop":false,"ease":"sine","slow":[]},
+            {"name":"影格 25","pos":[-129.44,316.505,-146.323],"yaw":137.2,"pitch":-2.8,"fov":60,"duration":2,"stop":false,"ease":"sine","slow":[]},
+            {"name":"B612抵達","pos":[-132.379,317.097,-145.466],"yaw":170.9,"pitch":-19.6,"fov":60,"duration":2,"stop":true,"ease":"sine","slow":[]}
+        ];
+    </script>
+
+    
+
+
+</head>
+<body>
+  <!-- fog：遠處淡出成夜空的顏色，near 開始變淡、far 完全看不到 -->
+  <a-scene fog="type: linear; color: #0b1020; near: 30; far: 150">
+
+    <a-assets>
+      <img id="stars" src="textures/star.jpg">
+      <img id="sand" src="textures/sand.jpg" >
+      <img id="b612-tex" src="textures/b612.jpg">
+
+        <a-mixin id="m-fuselage"       material="color: #efe6d2; roughness: 0.85; flat-shading: true"></a-mixin>
+        <a-mixin id="m-fuselage-open"  material="color: #efe6d2; roughness: 0.85; flat-shading: true; side: double"></a-mixin>
+        <a-mixin id="m-wing"           material="color: #a4462f; roughness: 0.85; flat-shading: true; side: double"></a-mixin>
+        <a-mixin id="m-wood"           material="color: #8b5a2b; roughness: 0.9;  flat-shading: true"></a-mixin>
+        <a-mixin id="m-metal"          material="color: #9a9a9a; roughness: 0.6;  flat-shading: true"></a-mixin>
+        <a-mixin id="m-engine"         material="color: #3d3d3d; roughness: 0.7;  flat-shading: true"></a-mixin>
+        <a-mixin id="m-engine-detail"  material="color: #5c5c5c; roughness: 0.6;  flat-shading: true"></a-mixin>
+        <a-mixin id="m-tire"           material="color: #2a2a2a; roughness: 0.95; flat-shading: true"></a-mixin>
+        <a-mixin id="m-leather"        material="color: #5b3a29; roughness: 0.9;  flat-shading: true"></a-mixin>
+
+        <a-mixin id="p-skin"   material="color: #f5d6b8; roughness: 0.9; flat-shading: true"></a-mixin>
+        <a-mixin id="p-hair"   material="color: #e8b830; roughness: 0.8; flat-shading: true; side: double"></a-mixin>
+        <a-mixin id="p-coat"   material="color: #8fbc5a; roughness: 0.9; flat-shading: true"></a-mixin>
+        <a-mixin id="p-pants"  material="color: #7aa64a; roughness: 0.9; flat-shading: true"></a-mixin>
+        <a-mixin id="p-shoe"   material="color: #6b4a2b; roughness: 0.8; flat-shading: true"></a-mixin>
+        <a-mixin id="p-scarf"  material="color: #f2c230; roughness: 0.8; flat-shading: true; side: double"></a-mixin>
+        <a-mixin id="p-brass"  material="color: #d9a521; roughness: 0.5; flat-shading: true"></a-mixin>
+
+        <a-mixin id="f-skin"    material="color: #f2d3bd; roughness: 0.9; flat-shading: true"></a-mixin>
+        <a-mixin id="f-jacket"  material="color: #7a4a2a; roughness: 0.8; flat-shading: true"></a-mixin>
+        <a-mixin id="f-cap"     material="color: #5a3a22; roughness: 0.8; flat-shading: true; side: double"></a-mixin>
+        <a-mixin id="f-fur"     material="color: #e8dcc4; roughness: 1;   flat-shading: true"></a-mixin>
+        <a-mixin id="f-pants"   material="color: #6e5a45; roughness: 0.9; flat-shading: true"></a-mixin>
+        <a-mixin id="f-boot"    material="color: #3b2a1e; roughness: 0.7; flat-shading: true"></a-mixin>
+        <a-mixin id="f-frame"   material="color: #3a3a3a; roughness: 0.5; flat-shading: true"></a-mixin>
+        <a-mixin id="f-glass"   material="color: #9fc6d6; roughness: 0.2; flat-shading: true"></a-mixin>
+    
+        <a-mixin id="b-ground" material="src: #b612-tex; repeat: 4 2; roughness: 1; flat-shading: true"></a-mixin>
+        <!-- B612 底光：四盞共用這個設定，改這裡就能一次調整亮度和顏色 -->
+        <a-mixin id="b612-fill" light="type: point; color: #FFFFFF; intensity: 0.3; distance: 25; decay: 0"></a-mixin>
+        <a-mixin id="b-rose"   material="color: #d23a4a; roughness: 0.8; flat-shading: true; side: double"></a-mixin>
+        <a-mixin id="b-stem"   material="color: #4f8a3a; roughness: 0.9; flat-shading: true"></a-mixin>
+        <a-mixin id="b-leaf"   material="color: #5a9a40; roughness: 0.9; flat-shading: true; side: double"></a-mixin>
+        <a-mixin id="b-trunk"  material="color: #7a6a45; roughness: 0.9; flat-shading: true"></a-mixin>
+        <a-mixin id="b-glass"  material="color: #d6ecff; roughness: 0.05; metalness: 0.1; opacity: 0.25; transparent: true; side: double"></a-mixin>
+        <a-mixin id="b-box"    material="color: #c8a878; roughness: 0.9; flat-shading: true"></a-mixin>
+        <a-mixin id="b-hole"   material="color: #1a1a1a; roughness: 1"></a-mixin>
+        <a-mixin id="b-volcano" material="color: #8a6a55; roughness: 1;  flat-shading: true"></a-mixin>
+        <a-mixin id="b-lava"   material="color: #ff6a2a; emissive: #ff4a10; emissiveIntensity: 0.8"></a-mixin>
+
+
+    </a-assets>
+
+
+    <a-plane id="desert" width="300" height="300"
+         segments-width="150" segments-height="150"
+         rotation="-90 0 0"
+         material="src: #sand; repeat: 100 100; roughness: 1"
+         ground-waves="height: 3; size: 0.15; flatRadius: 5; fade: 15"></a-plane>
+        
+    <!-- 天空：包住整個場景的大球，貼上星空圖 -->
+    <!-- fog: false 讓天空不受霧影響，不然星星會被霧蓋掉 -->
+    <a-sky radius="500" material="src: #stars; fog: false"></a-sky>
+
+
+   <!-- 宇宙底光：整個場景都照得到，很暗，讓星球背光面不會全黑 -->
+    <a-entity id="space-ambient" light="type: ambient; color: #6b7bb0; intensity: 0.15"></a-entity>
+
+    <!-- 地球燈光：攝影機飛高時慢慢關掉 -->
+    <a-entity id="earth-ambient" light="type: ambient; color: #6b7bb0; intensity: 0.35" altitude-fade></a-entity>
+    <a-entity id="earth-moon" light="type: directional; color: #d0dcff; intensity: 0.8" position="-3 6 4" altitude-fade></a-entity>
+
+    <!-- 攝影機：觀眾的眼睛，高度 1.6 公尺 -->
+    <!--a-entity camera look-controls wasd-controls position="0 1.6 2"></a-entity-->
+
+    <!-- 攝影機：rig 負責移動，裡面的 camera 負責轉頭 -->
+    <a-entity id="rig" position="0 1.6 2" camera-director="speed: 3">
+        <a-entity id="cam" camera position="0 0 0" look-controls></a-entity>
+    </a-entity>
+
+
+    <!-- ===================== 星球位置 ===================== -->
+    <a-entity id="planet-lamplighter" position="50 160 90" lamplighter-planet></a-entity>
+    <a-entity id="planet-drunkard" position="-100 200 15" scale="2.5 2.5 2.5"drunkard-planet></a-entity>
+    <a-entity id="planet-king" position="80 245 -55" scale="0.5 0.5 0.5" king-planet></a-entity>
+    
+
+    <!--===========================B612=============================-->
+    <a-entity id="planet-b612" position="-132.6 313.8 -142.6">
+
+        <!-- ===== B612 底光：從四面八方照，整顆星球都亮 =====
+        星球中心在原點，四盞燈離中心約 10 公尺；只照 B612 附近 -->
+        <a-entity id="b612-fill-lights">
+        <a-entity position="5.8 5.8 5.8"   mixin="b612-fill"></a-entity>
+        <a-entity position="5.8 -5.8 -5.8" mixin="b612-fill"></a-entity>
+        <a-entity position="-5.8 5.8 -5.8" mixin="b612-fill"></a-entity>
+        <a-entity position="-5.8 -5.8 5.8" mixin="b612-fill"></a-entity>
+        </a-entity>
+
+        <a-sphere id="b612-ground" radius="2" segments-width="28" segments-height="20" mixin="b-ground"></a-sphere>
+
+        <!-- ===== 玫瑰 ===== -->
+        <a-entity id="b612-place-rose" rotation="1.56 107.05 -1.48">
+            <a-entity position="0 1.995 0">
+                <a-entity id="b612-rose">
+                    <!-- 莖 -->
+                    <a-cylinder radius="0.004" height="0.25" position="0 0.125 0" mixin="b-stem"></a-cylinder>
+                    <!-- 刺：三角薄片，外層 rotation y = 長在莖的哪一側 -->
+                    <a-entity rotation="0 0 0">
+                        <a-entity geometry="primitive: prism; points: -0.003 0, 0.003 0, 0 0.01; depth: 0.002"
+                            position="0 0.08 0.003" rotation="60 0 0" mixin="b-stem"></a-entity>
+                    </a-entity>
+                    <a-entity rotation="0 130 0">
+                            <a-entity geometry="primitive: prism; points: -0.003 0, 0.003 0, 0 0.01; depth: 0.002"
+                                position="0 0.13 0.003" rotation="60 0 0" mixin="b-stem"></a-entity>
+                    </a-entity>
+                    <a-entity rotation="0 250 0">
+                        <a-entity geometry="primitive: prism; points: -0.003 0, 0.003 0, 0 0.01; depth: 0.002"
+                            position="0 0.18 0.003" rotation="60 0 0" mixin="b-stem"></a-entity>
+                    </a-entity>
+
+                    <!-- 葉子：兩個半片沿中脈折成 V 字
+                        外層 rotation y = 朝哪個方向；中層 rotation x = 往外倒的角度（90 = 水平）；
+                        內層兩片的 rotation y = 折起來的角度（越大越彎） -->
+                    <a-entity rotation="0 30 0">
+                        <a-entity position="0 0.03 0.003" rotation="70 0 0">
+                            <a-entity geometry="primitive: leaf-half; width: 0.022; length: 0.07" rotation="0 25 0" mixin="b-leaf"></a-entity>
+                            <a-entity geometry="primitive: leaf-half; width: 0.022; length: 0.07; mirror: true" rotation="0 -25 0" mixin="b-leaf"></a-entity>
+                        </a-entity>
+                    </a-entity>
+                    <a-entity rotation="0 150 0">
+                        <a-entity position="0 0.05 0.003" rotation="65 0 0">
+                            <a-entity geometry="primitive: leaf-half; width: 0.02; length: 0.065" rotation="0 25 0" mixin="b-leaf"></a-entity>
+                            <a-entity geometry="primitive: leaf-half; width: 0.02; length: 0.065; mirror: true" rotation="0 -25 0" mixin="b-leaf"></a-entity>
+                        </a-entity>
+                    </a-entity>
+                    <a-entity rotation="0 270 0">
+                        <a-entity position="0 0.07 0.003" rotation="60 0 0">
+                            <a-entity geometry="primitive: leaf-half; width: 0.018; length: 0.06" rotation="0 25 0" mixin="b-leaf"></a-entity>
+                            <a-entity geometry="primitive: leaf-half; width: 0.018; length: 0.06; mirror: true" rotation="0 -25 0" mixin="b-leaf"></a-entity>
+                        </a-entity>
+                    </a-entity>
+
+                    <!-- 花：綠色花托 + 半球杯子 + 四層花瓣（越裡面越小、越直立、片數越少） -->
+                    <a-entity id="b612-rose-head" position="0 0.25 0">
+                        <a-cone radius-bottom="0.004" radius-top="0.014" height="0.016" position="0 -0.035 0" mixin="b-stem"></a-cone>
+                        <a-sphere radius="0.03" theta-start="90" theta-length="90" mixin="b-rose"></a-sphere>
+                        <a-entity petal-ring="count: 7; radius: 0.026; height: -0.01;  tilt: 40; width: 0.04;  length: 0.04;  offset: 0;  mixin: b-rose"></a-entity>
+                        <a-entity petal-ring="count: 6; radius: 0.018; height: -0.005; tilt: 25; width: 0.034; length: 0.038; offset: 25; mixin: b-rose"></a-entity>
+                        <a-entity petal-ring="count: 5; radius: 0.011; height: 0;      tilt: 12; width: 0.026; length: 0.032; offset: 12; mixin: b-rose"></a-entity>
+                        <a-entity petal-ring="count: 4; radius: 0.005; height: 0.004;  tilt: 0;  width: 0.018; length: 0.026; offset: 45; mixin: b-rose"></a-entity>
+                    </a-entity>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <!-- ===== 倒下的玻璃罩：圓管 + 半球，側躺在地上 ===== -->
+        <a-entity id="b612-place-glass" rotation="11.73 123.81 0.07">
+            <a-entity position="0 1.992 0" rotation="0 100 0">
+                <!-- 內層 rotation y = 開口朝哪邊；z 90 = 側躺 -->
+                <a-entity id="b612-glass" rotation="0 -40 90" position="0 0.12 0">
+                    <a-cylinder radius="0.12" height="0.26" open-ended="true" segments-radial="24" mixin="b-glass"></a-cylinder>
+                    <a-sphere radius="0.12" theta-length="90" segments-width="24" segments-height="8"
+                        position="0 0.13 0" mixin="b-glass"></a-sphere>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <!-- ===== 綿羊的箱子：長方體 + 三個黑色圓洞 ===== -->
+        <a-entity id="b612-place-box" rotation="16.91 11.05 11.75">
+            <a-entity position="0 1.99 0" rotation="0 70 0">
+            <!-- rotation y = 洞朝哪邊，目前大致朝向鏡頭飛來的方向 -->
+                <a-entity id="b612-sheep-box" rotation="0 55 0">
+                    <a-box width="0.32" height="0.18" depth="0.22" position="0 0.09 0" mixin="b-box"></a-box>
+                    <a-circle radius="0.018" position="-0.07 0.09 0.1105" mixin="b-hole"></a-circle>
+                    <a-circle radius="0.018" position="0 0.09 0.1105" mixin="b-hole"></a-circle>
+                    <a-circle radius="0.018" position="0.07 0.09 0.1105" mixin="b-hole"></a-circle>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <!-- ===== 小猴麵包樹：樹幹分成 Y 字，枝頭各一片折起來的葉子 ===== -->
+        <a-entity id="b612-place-baobab" rotation="35 227.6 0">
+            <a-entity position="0 1.995 0" scale="1.2 1.2 2">
+                <a-entity id="b612-baobab">
+                    <a-cone radius-bottom="0.016" radius-top="0.01" height="0.2" position="0 0.1 0" mixin="b-trunk"></a-cone>
+                    <!-- 左枝：rotation z = 分岔角度 -->
+                    <a-entity position="0 0.2 0" rotation="0 0 25">
+                        <a-sphere radius="0.01" mixin="b-trunk"></a-sphere>
+                        <a-cylinder radius="0.008" height="0.12" position="0 0.06 0" mixin="b-trunk"></a-cylinder>
+                        <a-entity position="0 0.12 0" rotation="0 0 30">
+                            <a-entity geometry="primitive: leaf-half; width: 0.03; length: 0.09" rotation="0 30 0" mixin="b-leaf"></a-entity>
+                            <a-entity geometry="primitive: leaf-half; width: 0.03; length: 0.09; mirror: true" rotation="0 -30 0" mixin="b-leaf"></a-entity>
+                        </a-entity>
+                    </a-entity>
+                    <!-- 右枝 -->
+                    <a-entity position="0 0.2 0" rotation="0 0 -25">
+                        <a-cylinder radius="0.008" height="0.12" position="0 0.06 0" mixin="b-trunk"></a-cylinder>
+                        <a-entity position="0 0.12 0" rotation="0 0 -30">
+                            <a-entity geometry="primitive: leaf-half; width: 0.03; length: 0.09" rotation="0 30 0" mixin="b-leaf"></a-entity>
+                            <a-entity geometry="primitive: leaf-half; width: 0.03; length: 0.09; mirror: true" rotation="0 -30 0" mixin="b-leaf"></a-entity>
+                        </a-entity>
+                    </a-entity>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <!-- ===== 火山：圓台 + 頂端發光的火山口（想要死火山就把 mixin 改成 b-hole） ===== -->
+        <a-entity id="b612-place-volcano" rotation="40 -62.4 0">
+            <a-entity position="0 1.95 0" scale="2 2 2">
+                <a-entity id="b612-volcano">
+                    <a-cone radius-bottom="0.22" radius-top="0.06" height="0.2" segments-radial="10"
+                        position="0 0.1 0" mixin="b-volcano"></a-cone>
+                    <a-circle radius="0.05" position="0 0.2005 0" rotation="-90 0 0" mixin="b-lava"></a-circle>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <!-- ===== 第二座火山：側面 ===== -->
+        <a-entity id="b612-place-volcano-2" rotation="75 80 0">
+            <a-entity position="0 1.95 0" scale="1.5 1.5 1.5">
+                <a-entity id="b612-volcano-2">
+                    <a-cone radius-bottom="0.22" radius-top="0.06" height="0.2" segments-radial="10"
+                        position="0 0.1 0" mixin="b-volcano"></a-cone>
+                    <a-circle radius="0.05" position="0 0.2005 0" rotation="-90 0 0" mixin="b-lava"></a-circle>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <!-- ===== 第三座火山：星球下半部 ===== -->
+        <a-entity id="b612-place-volcano-3" rotation="120 -150 0">
+            <a-entity position="0 1.95 0" scale="2 2 2">
+                <a-entity id="b612-volcano-3">
+                    <a-cone radius-bottom="0.22" radius-top="0.06" height="0.2" segments-radial="10"
+                        position="0 0.1 0" mixin="b-volcano"></a-cone>
+                    <a-circle radius="0.05" position="0 0.2005 0" rotation="-90 0 0" mixin="b-lava"></a-circle>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <!-- ===== 站著的小王子 =====
+       原點在兩腳中間的地面；+z 是他面向的方向；+x 是他的左手邊 -->
+        <a-entity id="b612-place-prince" rotation="0.77 64 6.07">
+            
+            
+            <!-- ===== 夕陽主光 =====
+                放在小王子正前方 25 公尺、比他腳下高約 8° 的地方，像快落到地平線的太陽
+                decay: 0 = 不隨距離變暗；distance: 50 = 只照 B612 附近，不會照到其他星球 -->
+            <a-entity id="b612-sunset-light" position="0 5.47 -24.76"
+              light="type: point; color: #FF8A3D; intensity: 2; distance: 50; decay: 0"></a-entity>
+            
+              <a-entity position="0 1.995 0" rotation="0 180 0">
+                <a-entity id="b612-prince">
+
+                    <!-- 上半身：跟坐著的版本一模一樣，整組抬高 0.41（= 腿長） -->
+                    <a-entity id="b612-prince-upper" position="0 0.41 0">
+                        <a-sphere radius="0.105" theta-start="90" theta-length="90"
+                            position="0 0.105 0" scale="0.86 1 0.6" mixin="p-coat"></a-sphere>
+                        <a-cylinder radius="0.105" height="0.285"
+                            position="0 0.2475 0" scale="0.86 1 0.6" mixin="p-coat"></a-cylinder>
+                        <a-cylinder radius="0.108" height="0.025"
+                            position="0 0.16 0" scale="0.86 1 0.6" mixin="p-brass"></a-cylinder>
+                        <a-sphere radius="0.008" position="0 0.30 0.064" mixin="p-brass"></a-sphere>
+                        <a-sphere radius="0.008" position="0 0.24 0.064" mixin="p-brass"></a-sphere>
+
+                        <a-cylinder radius="0.03" height="0.06" position="0 0.40 0" mixin="p-skin"></a-cylinder>
+                        <a-torus radius="0.045" radius-tubular="0.011"
+                            position="-0.003 0.406 -0.019" rotation="90 0 0" mixin="p-scarf"></a-torus>
+
+                        <!-- 頭：rotation x 負值 = 抬頭，站著只微微往上看 -->
+                        <a-entity id="b612-prince-head" position="0 0.43 0" rotation="-12 0 0">
+                            <a-sphere radius="0.07" scale="1 1.2 1" segments-width="24" segments-height="18"
+                                position="0 0.075 0" mixin="p-skin"></a-sphere>
+                            <!-- 鼻子：這次放在頭的群組裡，抬頭低頭都會跟著動 -->
+                            <a-entity geometry="primitive: prism; points: 0 0.012, 0 -0.010, 0.018 -0.008; depth: 0.018"
+                                position="-0.001 0.058 0.067" rotation="0 -90 -15" scale="0.8 0.8 0.7" mixin="p-skin"></a-entity>
+                            <a-sphere radius="0.073" scale="1 1.2 1" segments-width="24" segments-height="18"
+                                position="0 0.082 -0.008" mixin="p-hair"></a-sphere>
+                            <!-- 瀏海 -->
+                            <a-entity position="0 0.12 0.062" rotation="-30 0 0">
+                                <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 -0.04; depth: 0.008"
+                                    position="-0.035 0.011 -0.017" rotation="-11.83 -20 -35" scale="1.2 1.2 1.2" mixin="p-hair"></a-entity>
+                                <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 -0.045; depth: 0.008"
+                                            position="-0.004 0.023 -0.008" rotation="-0.79 0 -30" scale="1.5 1.5 1.5" mixin="p-hair"></a-entity>
+                                <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 -0.038; depth: 0.008"
+                                            position="0.051 0.019 -0.039" rotation="-22.21 45.38 19.88" scale="1.3 1.3 1.3" mixin="p-hair"></a-entity>
+                                <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 -0.04; depth: 0.008"
+                                            position="-0.054 0.009 -0.031" rotation="-7.77 -26.96 -41.37" mixin="p-hair"></a-entity>
+                                <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 -0.038; depth: 0.008"
+                                            position="0.034 0.018 -0.018" rotation="-15.20 34.78 19.88" scale="1.3 1.3 1.3" mixin="p-hair"></a-entity>
+                            </a-entity>
+                            <!-- 亂翹的髮片 -->
+                            <a-entity position="0 0.082 -0.008">
+                                <a-entity rotation="0 0 0"><a-entity position="0 0.085 0" rotation="0 0 0">
+                                    <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 0.05; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                                </a-entity></a-entity>
+                                <a-entity rotation="-10 0 -30"><a-entity position="0 0.081 0" rotation="0 -90 0">
+                                    <a-entity geometry="primitive: prism; points: -0.015 0, 0.015 0, 0 0.045; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                                </a-entity></a-entity>
+                                <a-entity rotation="-10 0 30"><a-entity position="0 0.081 0" rotation="0 90 0">
+                                    <a-entity geometry="primitive: prism; points: -0.015 0, 0.015 0, 0 0.045; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                                </a-entity></a-entity>
+                                <a-entity rotation="15 0 10"><a-entity position="0 0.083 0" rotation="0 160 0">
+                                    <a-entity geometry="primitive: prism; points: -0.013 0, 0.013 0, 0 0.04; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                                </a-entity></a-entity>
+                                <a-entity rotation="-45 0 0"><a-entity position="0 0.077 0" rotation="0 0 0">
+                                    <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 0.05; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                                </a-entity></a-entity>
+                                <a-entity rotation="-55 0 -35"><a-entity position="0 0.077 0" rotation="0 -40 0">
+                                    <a-entity geometry="primitive: prism; points: -0.014 0, 0.014 0, 0 0.045; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                                </a-entity></a-entity>
+                                <a-entity rotation="-55 0 35"><a-entity position="0 0.077 0" rotation="0 40 0">
+                                    <a-entity geometry="primitive: prism; points: -0.014 0, 0.014 0, 0 0.045; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                                </a-entity></a-entity>
+                                <a-entity rotation="-20 0 -65"><a-entity position="0 0.074 0" rotation="0 -90 0">
+                                    <a-entity geometry="primitive: prism; points: -0.013 0, 0.013 0, 0 0.04; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                                </a-entity></a-entity>
+                                <a-entity rotation="-20 0 65"><a-entity position="0 0.074 0" rotation="0 90 0">
+                                    <a-entity geometry="primitive: prism; points: -0.013 0, 0.013 0, 0 0.04; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                                </a-entity></a-entity>
+                            </a-entity>
+                        </a-entity>
+
+                        <!-- 兩隻手自然垂下，rotation z = 往外張的角度 -->
+                        <a-entity id="b612-prince-arm-right" position="-0.086 0.355 0" rotation="0 0 -12">
+                            <a-sphere radius="0.027" mixin="p-coat"></a-sphere>
+                            <a-cylinder radius="0.025" height="0.305" position="0 -0.1525 0" mixin="p-coat"></a-cylinder>
+                            <a-sphere radius="0.03" position="0 -0.33 0" mixin="p-skin"></a-sphere>
+                        </a-entity>
+                        <a-entity id="b612-prince-arm-left" position="0.086 0.355 0" rotation="0 0 12">
+                            <a-sphere radius="0.027" mixin="p-coat"></a-sphere>
+                            <a-cylinder radius="0.025" height="0.305" position="0 -0.1525 0" mixin="p-coat"></a-cylinder>
+                            <a-sphere radius="0.03" position="0 -0.33 0" mixin="p-skin"></a-sphere>
+                        </a-entity>
+
+                        <!-- 飄在空中的圍巾：一節接一節，每一節的 rotation 都是「相對上一節」再彎多少
+                        rotation x 正值 = 往後飄；z 負值 = 往他的右手邊飄 -->
+                        <a-entity id="b612-prince-scarf-tail" position="0 0.405 -0.068" rotation="15 0 0">
+                            <a-box width="0.07" height="0.15" depth="0.008" position="0 -0.07 0" mixin="p-scarf"></a-box>
+                            <a-entity position="0 -0.14 0" rotation="25 0 -12">
+                                <a-box width="0.068" height="0.17" depth="0.008" position="0 -0.08 0" mixin="p-scarf"></a-box>
+                                <a-entity position="0 -0.16 0" rotation="15 0 -10">
+                                    <a-box width="0.064" height="0.17" depth="0.008" position="0 -0.08 0" mixin="p-scarf"></a-box>
+                                    <a-entity position="0 -0.16 0" rotation="-10 0 -5">
+                                        <a-box width="0.06" height="0.16" depth="0.008" position="0 -0.075 0" mixin="p-scarf"></a-box>
+                                            <a-entity position="0 -0.15 0" rotation="-15 0 0">
+                                                <a-box width="0.055" height="0.14" depth="0.008" position="0 -0.065 0" mixin="p-scarf"></a-box>
+                                            </a-entity>
+                                        </a-entity>
+                                    </a-entity>
+                            </a-entity>
+                        </a-entity>
+                    </a-entity>
+
+                    <!-- 腿：倒過來的圓錐（上寬下窄的褲管）+ 髖關節球 -->
+                    <a-entity id="b612-prince-leg-left" position="0.042 0 0.01">
+                        <a-sphere radius="0.05" position="0 0.46 0" mixin="p-pants"></a-sphere>
+                        <a-cone radius-bottom="0.028" radius-top="0.05" height="0.41" segments-radial="16"
+                            position="0 0.255 0" mixin="p-pants"></a-cone>
+                        <!-- 鞋子：rotation y = 腳尖往外開的角度 -->
+                        <a-entity position="0 0 0.01" rotation="0 10 0">
+                            <a-box width="0.07" height="0.05" depth="0.14" position="0 0.025 0.025" mixin="p-shoe"></a-box>
+                            <a-cylinder radius="0.035" height="0.05" theta-start="270" theta-length="180"
+                            position="0 0.025 0.095" mixin="p-shoe"></a-cylinder>
+                        </a-entity>
+                    </a-entity>
+                    <a-entity id="b612-prince-leg-right" position="-0.042 0 0.01">
+                        <a-sphere radius="0.05" position="0 0.46 0" mixin="p-pants"></a-sphere>
+                        <a-cone radius-bottom="0.028" radius-top="0.05" height="0.41" segments-radial="16"
+                            position="0 0.255 0" mixin="p-pants"></a-cone>
+                        <a-entity position="0 0 0.01" rotation="0 -10 0">
+                            <a-box width="0.07" height="0.05" depth="0.14" position="0 0.025 0.025" mixin="p-shoe"></a-box>
+                            <a-cylinder radius="0.035" height="0.05" theta-start="270" theta-length="180"
+                                position="0 0.025 0.095" mixin="p-shoe"></a-cylinder>
+                        </a-entity>
+                    </a-entity>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+    </a-entity>
+
+
+
+
+
+<!--earth-->
+
+    
+
+    <!-- 【飛機第三段】airplane 整段貼在這裡 -->
+     <!-- ===================== 飛機 ===================== -->
+    <a-entity id="airplane" position="0 0 -7" rotation="0 -35 0">
+
+        <!-- 機身群組：y 是離地高度，z 旋轉是機頭上仰角度 -->
+        <a-entity id="plane-body" position="0 0.9 0" rotation="0 0 7.2">
+
+            <a-sphere id="nose" radius="0.45" theta-length="90" segments-width="24" segments-height="8"
+                    position="2.4 0 0" rotation="0 0 -90" scale="1 1.35 1" mixin="m-fuselage-open"></a-sphere>
+
+            <a-cylinder id="engine-bay" radius="0.45" height="0.9" open-ended="true"
+                        theta-start="135" theta-length="270" segments-radial="18"
+                        position="1.95 0 0" rotation="0 0 90" mixin="m-fuselage-open"></a-cylinder>
+
+            <a-cylinder id="firewall" radius="0.45" height="0.15" segments-radial="24"
+                        position="1.425 0 0" rotation="0 0 90" mixin="m-fuselage"></a-cylinder>
+
+            <a-cylinder id="cockpit" radius="0.45" height="1.1" open-ended="true"
+                        theta-start="150" theta-length="240" segments-radial="16"
+                        position="0.8 0 0" rotation="0 0 90" mixin="m-fuselage-open"></a-cylinder>
+
+            <!-- 要拉長機身就改這個的 height，並把後面零件往 -x 移 -->
+            <a-cylinder id="rear-fuselage" radius="0.45" height="1.85" segments-radial="24"
+                        position="-0.675 0 0" rotation="0 0 90" mixin="m-fuselage"></a-cylinder>
+
+            <a-cone id="tail-cone" radius-bottom="0.45" radius-top="0.05" height="1.7" segments-radial="24"
+                    position="-2.45 0 0" rotation="0 0 90" mixin="m-fuselage"></a-cone>
+
+            <a-entity id="seat">
+                <a-box id="seat-cushion" width="0.45" height="0.1" depth="0.42" position="0.5 -0.2 0" mixin="m-leather"></a-box>
+                <a-box id="seat-back" width="0.08" height="0.45" depth="0.42" position="0.27 0.02 0" mixin="m-leather"></a-box>
+            </a-entity>
+
+            <a-entity id="engine" position="1.95 0 0">
+                <a-box id="engine-block" width="0.75" height="0.35" depth="0.38" position="0 -0.05 0" mixin="m-engine"></a-box>
+                <a-box id="valve-cover" width="0.65" height="0.08" depth="0.2" position="0 0.165 0" mixin="m-engine-detail"></a-box>
+                <a-cylinder id="exhaust-1" radius="0.04" height="0.14" position="-0.3 -0.05 0.47" rotation="90 0 0" mixin="m-metal"></a-cylinder>
+                <a-cylinder id="exhaust-2" radius="0.04" height="0.14" position="-0.1 -0.05 0.47" rotation="90 0 0" mixin="m-metal"></a-cylinder>
+                <a-cylinder id="exhaust-3" radius="0.04" height="0.14" position="0.1 -0.05 0.47" rotation="90 0 0" mixin="m-metal"></a-cylinder>
+                <a-cylinder id="exhaust-4" radius="0.04" height="0.14" position="0.3 -0.05 0.47" rotation="90 0 0" mixin="m-metal"></a-cylinder>
+            </a-entity>
+
+            <a-entity id="propeller" position="3.08 0 0">
+                <a-sphere id="prop-hub" radius="0.13" position="-0.02 0 0" mixin="m-metal"></a-sphere>
+                <a-entity id="blade-1" rotation="0 0 0">
+                    <a-entity rotation="0 20 0">
+                        <a-box width="0.05" height="0.81" depth="0.18" position="0 0.505 0" mixin="m-wood"></a-box>
+                        <a-cylinder radius="0.09" height="0.05" theta-start="0" theta-length="180"
+                                position="0 0.91 0" rotation="0 0 90" mixin="m-wood"></a-cylinder>
+                    </a-entity>
+                </a-entity>
+                <a-entity id="blade-2" rotation="120 0 0">
+                    <a-entity rotation="0 20 0">
+                        <a-box width="0.05" height="0.81" depth="0.18" position="0 0.505 0" mixin="m-wood"></a-box>
+                        <a-cylinder radius="0.09" height="0.05" theta-start="0" theta-length="180"
+                                position="0 0.91 0" rotation="0 0 90" mixin="m-wood"></a-cylinder>
+                    </a-entity>
+                </a-entity>
+                <a-entity id="blade-3" rotation="240 0 0">
+                    <a-entity rotation="0 20 0">
+                        <a-box width="0.05" height="0.81" depth="0.18" position="0 0.505 0" mixin="m-wood"></a-box>
+                        <a-cylinder radius="0.09" height="0.05" theta-start="0" theta-length="180"
+                                position="0 0.91 0" rotation="0 0 90" mixin="m-wood"></a-cylinder>
+                    </a-entity>
+                </a-entity>
+            </a-entity>
+
+            <!-- 主翼：rotation x 是上翹角度 -->
+            <a-entity id="wing-right" position="1.65 -0.33 0" rotation="-8 0 0">
+                <a-box width="1.45" height="0.15" depth="3.275" position="0 0 1.6375" mixin="m-wing"></a-box>
+                <a-cylinder radius="0.725" height="0.15" theta-start="270" theta-length="180" segments-radial="16"
+                        position="0 0 3.275" mixin="m-wing"></a-cylinder>
+            </a-entity>
+            <a-entity id="wing-left" position="1.65 -0.33 0" rotation="8 0 0">
+                <a-box width="1.45" height="0.15" depth="3.275" position="0 0 -1.6375" mixin="m-wing"></a-box>
+                <a-cylinder radius="0.725" height="0.15" theta-start="90" theta-length="180" segments-radial="16"
+                        position="0 0 -3.275" mixin="m-wing"></a-cylinder>
+            </a-entity>
+
+            <a-entity id="h-stabilizer" mixin="m-wing"
+                    geometry="primitive: prism; points: 0 -1.35, 0.4 -1.35, 0.9 0, 0.4 1.35, 0 1.35; depth: 0.08"
+                    position="-1.6 -0.15 0" rotation="90 0 0"></a-entity>
+
+            <a-entity id="v-fin" mixin="m-wing"
+                    geometry="primitive: prism; points: 0 0, 0 0.9, 1.1 0; depth: 0.08"
+                    position="-1.6 0.38 0"></a-entity>
+
+            <a-entity id="main-gear-right" position="1.73 0 1.6">
+                <a-box width="0.08" height="0.67" depth="0.08" position="0 -0.515 0" mixin="m-metal"></a-box>
+                <a-sphere radius="0.3" position="0 -0.85 0" scale="1 1 0.45" mixin="m-tire"></a-sphere>
+            </a-entity>
+            <a-entity id="main-gear-left" position="1.73 0 -1.6">
+                <a-box width="0.08" height="0.67" depth="0.08" position="0 -0.515 0" mixin="m-metal"></a-box>
+                <a-sphere radius="0.3" position="0 -0.85 0" scale="1 1 0.45" mixin="m-tire"></a-sphere>
+            </a-entity>
+
+            <a-entity id="tail-gear" position="-1.45 0 0">
+                <a-box width="0.06" height="0.2" depth="0.06" position="0 -0.5 0" mixin="m-metal"></a-box>
+                <a-sphere radius="0.15" position="0 -0.6 0" scale="1 1 0.5" mixin="m-tire"></a-sphere>
+            </a-entity>
+        </a-entity>
+
+        <!-- 拆下來放在沙地上的引擎蓋 -->
+        <a-entity id="engine-cover" position="2.302 0 2.849" rotation="0 30 0">
+            <a-cylinder radius="0.46" height="0.9" open-ended="true" theta-start="45" theta-length="90"
+                        segments-radial="6" position="0 -0.325 0" rotation="0 0 90" mixin="m-fuselage-open"></a-cylinder>
+        </a-entity>
+    </a-entity>
+
+
+
+    <!-- ===================== 小王子 ===================== -->
+<!-- 原點在屁股正下方的地面；+z 是他面向的方向（腿伸出去的方向）；+x 是他的左手邊 -->
+    <a-entity id="prince" position="1.5 0 -4" rotation="0 -20 0">
+
+        <!-- 身體：壓扁的圓柱 + 屁股半球 -->
+        <a-sphere id="prince-butt" radius="0.105" theta-start="90" theta-length="90"
+            position="0 0.105 0" scale="0.86 1 0.6" mixin="p-coat"></a-sphere>
+        <a-cylinder id="prince-torso" radius="0.105" height="0.285"
+            position="0 0.2475 0" scale="0.86 1 0.6" mixin="p-coat"></a-cylinder>
+
+        <!-- 腰帶、釦子 -->
+        <a-cylinder id="prince-belt" radius="0.108" height="0.025"
+            position="0 0.16 0" scale="0.86 1 0.6" mixin="p-brass"></a-cylinder>
+        <a-sphere id="prince-button-1" radius="0.008" position="0 0.30 0.064" mixin="p-brass"></a-sphere>
+        <a-sphere id="prince-button-2" radius="0.008" position="0 0.24 0.064" mixin="p-brass"></a-sphere>
+
+        <!-- 脖子、繞脖子的圍巾 -->
+        <a-cylinder id="prince-neck" radius="0.03" height="0.06" position="0 0.40 0" mixin="p-skin"></a-cylinder>
+        <a-torus id="prince-scarf-wrap" radius="0.045" radius-tubular="0.011"
+           position="-0.003 0.406 -0.019" rotation="90 0 0" mixin="p-scarf"></a-torus>
+
+         <!-- 頭：群組放在脖子頂端當轉軸，rotation x 負值 = 往上仰 -->
+        <a-entity id="prince-head" position="0 0.43 0" rotation="-25 0 0">
+            <a-sphere id="prince-face" radius="0.07" scale="1 1.2 1" segments-width="24" segments-height="18"
+              position="0 0.075 0" mixin="p-skin"></a-sphere>
+            <!-- 頭髮：薄薄一層的偏移球體 -->
+            <a-sphere id="prince-hair" radius="0.073" scale="1 1.2 1" segments-width="24" segments-height="18"
+              position="0 0.082 -0.008" mixin="p-hair"></a-sphere>
+            <!-- 瀏海：三片薄三角柱 -->
+            <a-entity id="prince-bangs" position="0 0.12 0.062" rotation="-30 0 0">
+                <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 -0.04; depth: 0.008"
+                    position="-0.035 0.011 -0.017" rotation="-11.83 -20 -35" scale="1.2 1.2 1.2" mixin="p-hair"></a-entity>
+                <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 -0.045; depth: 0.008"
+                    position="-0.004 0.023 -0.008" rotation="-0.79 0 -30" scale="1.5 1.5 1.5" mixin="p-hair"></a-entity>
+                <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 -0.038; depth: 0.008"
+                    position="0.051 0.019 -0.039" rotation="-22.21 45.38 19.88" scale="1.3, 1.3, 1.3" mixin="p-hair"></a-entity>
+                <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 -0.04; depth: 0.008"
+                    position="-0.054 0.009 -0.031" rotation="-7.77 -26.96 -41.37" mixin="p-hair"></a-entity>
+                <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 -0.038; depth: 0.008"
+                    position="0.034 0.018 -0.018" rotation="-15.20 34.78 19.88" scale="1.3, 1.3, 1.3" mixin="p-hair"></a-entity>
+            </a-entity>
+            
+            <!-- 亂翹的頭髮：三角片貼在頭髮上
+     第一層 rotation = 貼在頭的哪個位置
+     第二層 position y = 離頭中心多遠（貼齊頭髮表面），rotation y = 髮尖朝哪個方向（0 朝後、90 朝右、-90 朝左）
+     第三層 rotation x -70 = 平貼頭髮、髮尖翹起約 20 度 -->
+            <a-entity id="prince-tufts" position="0 0.082 -0.008">
+                <!-- 頭頂 -->
+                <a-entity rotation="0 0 0">
+                    <a-entity position="0 0.085 0" rotation="0 0 0">
+                        <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 0.05; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                    </a-entity>
+                </a-entity>
+                <!-- 頭頂偏左、偏右 -->
+                <a-entity rotation="-10 0 -30">
+                    <a-entity position="0 0.081 0" rotation="0 -90 0">
+                        <a-entity geometry="primitive: prism; points: -0.015 0, 0.015 0, 0 0.045; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                    </a-entity>
+                </a-entity>
+                <a-entity rotation="-10 0 30">
+                    <a-entity position="0 0.081 0" rotation="0 90 0">
+                        <a-entity geometry="primitive: prism; points: -0.015 0, 0.015 0, 0 0.045; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                    </a-entity>
+                </a-entity>
+                <!-- 頭頂前方，髮尖往前翹 -->
+                <a-entity rotation="15 0 10">
+                    <a-entity position="0 0.083 0" rotation="0 160 0">
+                        <a-entity geometry="primitive: prism; points: -0.013 0, 0.013 0, 0 0.04; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                    </a-entity>
+                </a-entity>
+                <!-- 後腦 -->
+                <a-entity rotation="-45 0 0">
+                    <a-entity position="0 0.077 0" rotation="0 0 0">
+                        <a-entity geometry="primitive: prism; points: -0.016 0, 0.016 0, 0 0.05; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                    </a-entity>
+                </a-entity>
+                <a-entity rotation="-55 0 -35">
+                    <a-entity position="0 0.077 0" rotation="0 -40 0">
+                        <a-entity geometry="primitive: prism; points: -0.014 0, 0.014 0, 0 0.045; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                    </a-entity>
+                </a-entity>
+                <a-entity rotation="-55 0 35">
+                    <a-entity position="0 0.077 0" rotation="0 40 0">
+                        <a-entity geometry="primitive: prism; points: -0.014 0, 0.014 0, 0 0.045; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                    </a-entity>
+                </a-entity>
+                <!-- 兩側耳朵上方 -->
+                <a-entity rotation="-20 0 -65">
+                    <a-entity position="0 0.074 0" rotation="0 -90 0">
+                        <a-entity geometry="primitive: prism; points: -0.013 0, 0.013 0, 0 0.04; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                    </a-entity>
+                </a-entity>
+                <a-entity rotation="-20 0 65">
+                    <a-entity position="0 0.074 0" rotation="0 90 0">
+                        <a-entity geometry="primitive: prism; points: -0.013 0, 0.013 0, 0 0.04; depth: 0.006" rotation="-70 0 0" mixin="p-hair"></a-entity>
+                    </a-entity>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <!-- 右手（垂下撐地）：群組放在肩膀，rotation z 負值 = 往外張 -->
+        <a-entity id="prince-arm-right" position="-0.086 0.355 0" rotation="0 0 -10">
+            <a-sphere radius="0.027" mixin="p-coat"></a-sphere>
+            <a-cylinder radius="0.025" height="0.305" position="0 -0.1525 0" mixin="p-coat"></a-cylinder>
+            <a-sphere radius="0.03" position="0 -0.33 0" mixin="p-skin"></a-sphere>
+        </a-entity>
+
+  <!-- 左手（指天空）：rotation x 正值 = 往前舉，z 負值 = 往外張 -->
+        <a-entity id="prince-arm-left" position="0.086 0.355 0" rotation="25 0 -10">
+            <a-sphere radius="0.027" mixin="p-coat"></a-sphere>
+            <a-cylinder radius="0.025" height="0.305" position="0 0.1525 0" mixin="p-coat"></a-cylinder>
+            <a-sphere radius="0.03" position="0 0.33 0" mixin="p-skin"></a-sphere>
+            <a-box id="prince-finger" width="0.012" height="0.05" depth="0.012" position="-0.011 0.378 0" mixin="p-skin"></a-box>
+        </a-entity>
+
+    <!-- 腿：外層 rotation y = 兩腳張開角度；內層 rotation x 3.1 = 讓圓錐下緣貼地 -->
+        <a-entity id="prince-leg-left" position="0.042 0.05 0.01" rotation="0 9 0">
+            <a-entity rotation="3.1 0 0">
+                <a-sphere radius="0.05" mixin="p-pants"></a-sphere>
+                <a-cone radius-bottom="0.05" radius-top="0.028" height="0.40" segments-radial="16"
+                    position="0 0 0.20" rotation="90 0 0" mixin="p-pants"></a-cone>
+      <!-- 鞋子：抵消 3.1° 讓它立正，鞋底朝前、腳跟著地 -->
+                <a-entity position="0 0 0.40" rotation="-3.1 0 -20">
+                    <a-box width="0.07" height="0.12" depth="0.06" position="0 0.032 0.015" mixin="p-shoe"></a-box>
+                    <a-cylinder radius="0.035" height="0.06" theta-start="90" theta-length="180"
+                        position="0 0.092 0.015" rotation="90 0 0" mixin="p-shoe"></a-cylinder>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <a-entity id="prince-leg-right" position="-0.042 0.05 0.01" rotation="0 -9 0">
+            <a-entity rotation="3.1 0 0">
+                <a-sphere radius="0.05" mixin="p-pants"></a-sphere>
+                <a-cone radius-bottom="0.05" radius-top="0.028" height="0.40" segments-radial="16"
+                position="0 0 0.20" rotation="90 0 0" mixin="p-pants"></a-cone>
+                <a-entity position="0 0 0.40" rotation="-3.1 0 20">
+                    <a-box width="0.07" height="0.12" depth="0.06" position="0 0.032 0.015" mixin="p-shoe"></a-box>
+                    <a-cylinder radius="0.035" height="0.06" theta-start="90" theta-length="180"
+                        position="0 0.092 0.015" rotation="90 0 0" mixin="p-shoe"></a-cylinder>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <!-- 圍巾尾巴：從脖子後面垂下 → 轉彎落地 → 往右後方拖 → 繞到右側 -->
+        <a-entity id="prince-scarf-tail">
+            <a-box width="0.07" height="0.30" depth="0.008" position="0 0.25 -0.072" mixin="p-scarf"></a-box>
+            <a-box width="0.07" height="0.14" depth="0.008" position="-0.01 0.057 -0.11" rotation="36 0 0" mixin="p-scarf"></a-box>
+            <a-box width="0.07" height="0.008" depth="0.24" position="-0.098 0.004 -0.228" rotation="0 -135 0" mixin="p-scarf"></a-box>
+            <a-box width="0.07" height="0.008" depth="0.27" position="-0.276 0.004 -0.231" rotation="0 -53 0" mixin="p-scarf"></a-box>
+            <a-box width="0.06" height="0.008" depth="0.17" position="-0.398 0.004 -0.085" rotation="0 -17.5 0" mixin="p-scarf"></a-box>
+        </a-entity>
+
+        <!-- 鼻子：側面看是三角形的三角柱，鼻尖朝前下方
+        position y 越大鼻子越高；z 是貼在臉上的深度 -->
+        <a-entity id="prince-nose"
+                geometry="primitive: prism; points: 0 0.012, 0 -0.010, 0.018 -0.008; depth: 0.018"
+                position="-0.001 0.511 0.036" rotation="0 -90 10" scale="0.8 0.8 0.7" mixin="p-skin"></a-entity>
+    </a-entity>
+
+
+    <!-- ===================== 飛行員 ===================== -->
+    <!-- 原點在屁股正下方的地面；+z 是他面向的方向；+x 是他的左手邊 -->
+    <a-entity id="pilot" position="2.01 -0.021 -3.806" rotation="0 -20 0">
+
+        <!-- 上半身群組：轉軸在屁股中心，rotation x 負值 = 往後仰 -->
+        <a-entity id="pilot-upper" position="0 0.11 0" rotation="-10 0 0">
+
+            <!-- 屁股半球（跟圓台底部同半徑） -->
+            <a-sphere id="pilot-butt" radius="0.13" theta-start="90" theta-length="90"
+                    scale="1 0.85 0.5" mixin="f-jacket"></a-sphere>
+
+            <!-- 身體：上寬下窄的圓台 = 倒三角 -->
+            <a-cone id="pilot-torso" radius-bottom="0.13" radius-top="0.19" height="0.43" segments-radial="24"
+                    position="0 0.215 0" scale="1 1 0.5" mixin="f-jacket"></a-cone>
+
+            <!-- 脖子、領口毛絨 -->
+            <a-cylinder id="pilot-neck" radius="0.05" height="0.09" position="0 0.455 0" mixin="f-skin"></a-cylinder>
+            <a-torus id="pilot-fur-collar" radius="0.07" radius-tubular="0.035"
+                    position="0 0.435 0" rotation="90 0 0" mixin="f-fur"></a-torus>
+
+            <!-- 頭：群組在脖子頂端，rotation x 負值 = 抬頭（會再加上身體的 10°） -->
+            <a-entity id="pilot-head" position="0 0.50 0" rotation="-25 0 0">
+                <a-sphere id="pilot-face" radius="0.07" scale="1 1.35 1" segments-width="24" segments-height="18"
+                position="0 0.09 0" mixin="f-skin"></a-sphere>
+                <a-entity id="pilot-nose"
+                    geometry="primitive: prism; points: 0 0.018, 0 -0.012, 0.024 -0.010; depth: 0.022"
+                    position="0 0.075 0.066" rotation="0 -90 0" mixin="f-skin"></a-entity>
+
+                <!-- 帽身：跟頭髮一樣的偏移球體 -->
+                <a-sphere id="pilot-cap" radius="0.075" scale="1 1.35 1" segments-width="24" segments-height="18"
+                    position="0 0.102 -0.008" mixin="f-cap"></a-sphere>
+
+                <!-- 護耳：梯形薄片，外層 rotation z = 往外張的角度 -->
+                <a-entity id="pilot-earflap-left" position="0.076 0.085 -0.005" rotation="0 0 8">
+                    <a-entity geometry="primitive: prism; points: 0.035 0.04, -0.035 0.04, -0.026 -0.05, 0.026 -0.05; depth: 0.012"
+                        rotation="0 90 0" mixin="f-cap"></a-entity>
+                </a-entity>
+                <a-entity id="pilot-earflap-right" position="-0.076 0.085 -0.005" rotation="0 0 -8">
+                    <a-entity geometry="primitive: prism; points: 0.035 0.04, -0.035 0.04, -0.026 -0.05, 0.026 -0.05; depth: 0.012"
+                        rotation="0 90 0" mixin="f-cap"></a-entity>
+                </a-entity>
+
+                <!-- 護目鏡：推到帽緣上，rotation x 讓它順著額頭往上斜 -->
+                <a-entity id="pilot-goggles" position="-0.001 0.137 0.057" rotation="7.49 0 0">
+                    <!-- 底板：兩個半橢圓柱 + 中間連接的圓柱 -->
+                    <a-cylinder radius="0.034" height="0.008" theta-start="0" theta-length="180"
+                        position="0.034 0 0.004" rotation="90 0 0" scale="1 1 0.8" mixin="f-boot"></a-cylinder>
+                    <a-cylinder radius="0.034" height="0.008" theta-start="180" theta-length="180"
+                        position="-0.034 0 0.004" rotation="90 0 0" scale="1 1 0.8" mixin="f-boot"></a-cylinder>
+                    <a-cylinder radius="0.009" height="0.03" position="0 0 0.004" rotation="0 0 90" mixin="f-boot"></a-cylinder>
+                    <!-- 鏡框 + 鏡片 -->
+                    <a-cylinder radius="0.027" height="0.018" position="0.034 0 0.017" rotation="90 0 0" mixin="f-frame"></a-cylinder>
+                    <a-cylinder radius="0.021" height="0.02" position="0.034 0 0.017" rotation="90 0 0" mixin="f-glass"></a-cylinder>
+                    <a-cylinder radius="0.027" height="0.018" position="-0.034 0 0.017" rotation="90 0 0" mixin="f-frame"></a-cylinder>
+                    <a-cylinder radius="0.021" height="0.02" position="-0.034 0 0.017" rotation="90 0 0" mixin="f-glass"></a-cylinder>
+                </a-entity>
+            </a-entity>
+        </a-entity>
+
+        <!-- 手臂：群組放在（仰身後的）肩膀，手臂往 -y 長，rotation 讓手往後下方撐到地面 -->
+        <a-entity id="pilot-arm-left" position="0.17 0.504 -0.069" rotation="29.4 0 10.6">
+            <a-sphere radius="0.055" mixin="f-jacket"></a-sphere>
+            <a-cylinder radius="0.045" height="0.27" position="0 -0.135 0" mixin="f-jacket"></a-cylinder>
+            <a-sphere radius="0.042" position="0 -0.27 0" mixin="f-jacket"></a-sphere>
+            <a-cylinder radius="0.038" height="0.22" position="0 -0.38 0" mixin="f-jacket"></a-cylinder>
+            <a-sphere radius="0.042" position="0 -0.535 0" mixin="f-skin"></a-sphere>
+        </a-entity>
+        <a-entity id="pilot-arm-right" position="-0.17 0.504 -0.069" rotation="29.4 0 -10.6">
+            <a-sphere radius="0.055" mixin="f-jacket"></a-sphere>
+            <a-cylinder radius="0.045" height="0.27" position="0 -0.135 0" mixin="f-jacket"></a-cylinder>
+            <a-sphere radius="0.042" position="0 -0.27 0" mixin="f-jacket"></a-sphere>
+            <a-cylinder radius="0.038" height="0.22" position="0 -0.38 0" mixin="f-jacket"></a-cylinder>
+            <a-sphere radius="0.042" position="0 -0.535 0" mixin="f-skin"></a-sphere>
+        </a-entity>
+
+        <!-- ===== 盤腿 =====
+            每一段都往自己的 +z 長；rotation 第一個值 = 上下（負值往上、正值往下），第二個值 = 左右方向
+            大腿群組放在髖關節、小腿群組放在膝蓋、鞋子群組放在腳踝 -->
+
+        <!-- 左腳（內側）：大腿往左前方微微抬起 -->
+        <a-entity id="pilot-thigh-left" position="0.075 0.07 0.02" rotation="-12 30 0">
+            <a-sphere radius="0.066" mixin="f-pants"></a-sphere>
+            <a-cylinder radius="0.066" height="0.32" position="0 0 0.16" rotation="90 0 0" mixin="f-pants"></a-cylinder>
+        </a-entity>
+        <!-- 左小腿：從左膝往右後方斜下到地面 -->
+        <a-entity id="pilot-shin-left" position="0.232 0.137 0.291" rotation="15.4 -105 0">
+            <a-sphere radius="0.062" mixin="f-pants"></a-sphere>
+            <a-cone radius-bottom="0.058" radius-top="0.036" height="0.344" segments-radial="16"
+                    position="0 0 0.172" rotation="90 0 0" mixin="f-pants"></a-cone>
+        </a-entity>
+        <!-- 左鞋：塞在右大腿下方；rotation 第三個值 = 腳掌側翻的角度 -->
+        <a-entity id="pilot-shoe-left" position="-0.09 0.062 0.205" rotation="0 -100 70">
+            <a-box width="0.09" height="0.08" depth="0.20" position="0 -0.005 0.07" mixin="f-boot"></a-box>
+            <a-cylinder radius="0.045" height="0.08" theta-start="270" theta-length="180"
+                        position="0 -0.005 0.17" mixin="f-boot"></a-cylinder>
+        </a-entity>
+
+        <!-- 右腳（外側）：小腿從左小腿前方交叉過去 -->
+        <a-entity id="pilot-thigh-right" position="-0.075 0.07 0.02" rotation="-12 -30 0">
+            <a-sphere radius="0.066" mixin="f-pants"></a-sphere>
+            <a-cylinder radius="0.066" height="0.32" position="0 0 0.16" rotation="90 0 0" mixin="f-pants"></a-cylinder>
+        </a-entity>
+        <a-entity id="pilot-shin-right" position="-0.232 0.137 0.291" rotation="15.4 74.5 0">
+            <a-sphere radius="0.062" mixin="f-pants"></a-sphere>
+            <a-cone radius-bottom="0.058" radius-top="0.036" height="0.344" segments-radial="16"
+                    position="0 0 0.172" rotation="90 0 0" mixin="f-pants"></a-cone>
+        </a-entity>
+        <a-entity id="pilot-shoe-right" position="0.09 0.062 0.38" rotation="0 80 -70">
+            <a-box width="0.09" height="0.08" depth="0.20" position="0 -0.005 0.07" mixin="f-boot"></a-box>
+            <a-cylinder radius="0.045" height="0.08" theta-start="270" theta-length="180"
+                        position="0 -0.005 0.17" mixin="f-boot"></a-cylinder>
+        </a-entity>
+    </a-entity>
+
+</a-scene>
+</body>
+</html>

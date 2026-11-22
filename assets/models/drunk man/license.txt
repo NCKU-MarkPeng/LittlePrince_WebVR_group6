@@ -1,0 +1,11 @@
+Model Information:
+* title:	Bearded Man Sitting At Beach
+* source:	https://sketchfab.com/3d-models/bearded-man-sitting-at-beach-0b5b3967f5c84b52a2070d7d01edba95
+* author:	restore50 (https://sketchfab.com/restore50)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Bearded Man Sitting At Beach" (https://sketchfab.com/3d-models/bearded-man-sitting-at-beach-0b5b3967f5c84b52a2070d7d01edba95) by restore50 (https://sketchfab.com/restore50) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
